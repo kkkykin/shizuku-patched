@@ -1,0 +1,8 @@
+_builder/
+release-assets/
+*.apk
+*.jks
+*.keystore
+signing.properties
+__pycache__/
+.DS_Store
