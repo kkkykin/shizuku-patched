@@ -28,18 +28,26 @@
 
 ## APK 签名
 
-没有配置签名 secrets 时，工作流自动生成调试密钥，构建并发布可安装的 release APK。**每次生成的密钥不同**，因此不能直接覆盖安装其他签名的版本，也不能保证覆盖上一次构建；需要长期使用和覆盖升级时，请配置固定密钥。
+默认使用仓库中的 [emacs-keystore](emacs-keystore)，无需配置 secrets：
 
-在仓库 **Settings → Secrets and variables → Actions** 中设置：
+| 配置 | 值 |
+| --- | --- |
+| keystore password | `emacs1` |
+| alias | `Emacs keystore` |
+| key / alias password | `emacs1`，与 keystore password 相同，已验证可解锁私钥 |
+
+每次构建使用相同的签名密钥，可以覆盖安装本仓库此前使用这份密钥签名的版本。
+
+需要改用其他 keystore 时，在仓库 **Settings → Secrets and variables → Actions** 中设置：
 
 | Secret | 内容 |
 | --- | --- |
 | `KEYSTORE` | JKS 或 keystore 文件的 Base64 内容 |
 | `KEYSTORE_PASSWORD` | keystore 密码 |
 | `KEYSTORE_ALIAS` | 签名密钥 alias |
-| `KEYSTORE_ALIAS_PASSWORD` | 签名密钥密码 |
+| `KEYSTORE_ALIAS_PASSWORD` | 可选；留空使用 `KEYSTORE_PASSWORD` |
 
-四项都配置后自动使用自定义签名；只配置部分会报错。签名文件只在 runner 中临时生成，构建结束后删除。上游 APK 的签名密钥不会随源码提供，使用自己的密钥不能覆盖安装上游签名的 APK。
+前三项都配置后自动使用自定义签名；配置不完整会报错。构建时将 keystore 复制到 runner 临时目录，并生成 `signing.properties`，结束后删除这两个临时文件。上游 APK 的签名密钥不会随源码提供，使用不同密钥签名的 APK 不能互相覆盖安装。
 
 ## 本地检查补丁
 

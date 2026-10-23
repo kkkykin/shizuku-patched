@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare signing.properties using Actions secrets or a fresh debug key."""
+"""Prepare signing.properties using Actions secrets or the bundled emacs-keystore."""
 
 import base64
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 
@@ -27,26 +26,28 @@ source_dir = Path(sys.argv[1]).resolve()
 key_file = Path(os.environ["RUNNER_TEMP"]) / "shizuku-patched-signing.jks"
 names = ("KEYSTORE", "KEYSTORE_PASSWORD", "KEYSTORE_ALIAS", "KEYSTORE_ALIAS_PASSWORD")
 secrets = {name: os.environ.get(name, "") for name in names}
-if any(secrets.values()) and not all(secrets.values()):
-    raise SystemExit("Configure all four signing secrets: " + ", ".join(names))
+custom_signing = any(secrets.values())
+if custom_signing and not all(secrets[name] for name in names[:3]):
+    raise SystemExit("Configure KEYSTORE, KEYSTORE_PASSWORD, and KEYSTORE_ALIAS together.")
 
 os.umask(0o077)
-if secrets["KEYSTORE"]:
+if custom_signing:
     try:
         key_file.write_bytes(base64.b64decode("".join(secrets["KEYSTORE"].split()), validate=True))
     except ValueError:
         raise SystemExit("KEYSTORE must contain a base64-encoded keystore.") from None
+    secrets["KEYSTORE_ALIAS_PASSWORD"] = (
+        secrets["KEYSTORE_ALIAS_PASSWORD"] or secrets["KEYSTORE_PASSWORD"]
+    )
     mode = "custom"
 else:
-    subprocess.run([
-        "keytool", "-genkeypair", "-keystore", str(key_file),
-        "-storepass", "android", "-keypass", "android",
-        "-alias", "androiddebugkey", "-dname", "CN=Android Debug,O=Android,C=US",
-        "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
-    ], check=True, stdout=subprocess.DEVNULL)
-    secrets.update(KEYSTORE_PASSWORD="android", KEYSTORE_ALIAS="androiddebugkey",
-                   KEYSTORE_ALIAS_PASSWORD="android")
-    mode = "debug"
+    bundled_key = Path(__file__).resolve().parent.parent / "emacs-keystore"
+    if not bundled_key.is_file():
+        raise SystemExit("Default signing keystore is missing: emacs-keystore")
+    key_file.write_bytes(bundled_key.read_bytes())
+    secrets.update(KEYSTORE_PASSWORD="emacs1", KEYSTORE_ALIAS="Emacs keystore",
+                   KEYSTORE_ALIAS_PASSWORD="emacs1")
+    mode = "emacs-keystore"
 
 properties = {"KEYSTORE_FILE": str(key_file),
               **{name: secrets[name] for name in names if name != "KEYSTORE"}}

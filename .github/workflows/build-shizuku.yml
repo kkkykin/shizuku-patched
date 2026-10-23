@@ -94,7 +94,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Prepare APK signing
+      - name: Prepare APK signing (emacs-keystore by default)
         id: signing
         env:
           KEYSTORE: ${{ secrets.KEYSTORE }}
@@ -135,9 +135,6 @@ jobs:
             printf -- '- Release tag: `%s`\n' "$TAG_NAME"
             printf -- '- Signing: `%s`\n' "$SIGNING_MODE"
             printf -- '- Build log: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            if [[ "$SIGNING_MODE" == debug ]]; then
-              printf '\nThis APK uses a fresh debug certificate. Configure keystore secrets for a stable signing key across builds. It cannot update an APK signed with another key.\n'
-            fi
             printf '\n## Patches\n\n'
             printf -- '- main: remove `Entering shell...` from rish stdout.\n'
             printf -- '- api: fix the stderr pipe and wait for stdout/stderr to drain before exiting.\n\n```text\n'
