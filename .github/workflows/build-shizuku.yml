@@ -137,7 +137,7 @@ jobs:
             printf -- '- Build log: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf '\n## Patches\n\n'
             printf -- '- main: remove `Entering shell...` from rish stdout.\n'
-            printf -- '- api: fix the stderr pipe and wait for stdout/stderr to drain before exiting.\n\n```text\n'
+            printf -- '- api: fix stderr forwarding, mixed TTY redirection, EOF handling and Binder replies; wait for output to drain and the child to exit.\n\n```text\n'
             cat "$RUNNER_TEMP/shizuku-patch-report.txt"
             printf '```\n\n## Patch SHA256\n\n```text\n'
             for patch in patches/main/*.patch patches/main/*.diff patches/api/*.patch patches/api/*.diff; do

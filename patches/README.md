@@ -3,7 +3,7 @@
 `main/` 中的补丁相对于 Shizuku 主库根目录，`api/` 中的补丁相对于 API 子模块根目录。
 
 - `main/0001-remove-entering-shell-message.patch`：只删除进入 shell 前写到 stdout 的提示。
-- `api/pr534-with-stderr-drain.patch`：来自 `/tmp/shizuku-pr534-eHHoqc/pr534-with-stderr-drain.patch`，保留原始内容。
+- `api/issue178-complete.patch`：修正 stderr 管道及混合 TTY 重定向，正确处理 EOF、等待输出排空及子进程退出，并修复 Binder 回复。
 
 当前验证基线：
 

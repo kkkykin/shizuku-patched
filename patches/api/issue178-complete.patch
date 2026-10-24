@@ -1,0 +1,342 @@
+diff --git a/rish/src/main/cpp/pts.cpp b/rish/src/main/cpp/pts.cpp
+index 2122bec..f21cc40 100644
+--- a/rish/src/main/cpp/pts.cpp
++++ b/rish/src/main/cpp/pts.cpp
+@@ -56,15 +56,17 @@ struct transfer_thread_data {
+     int out;
+     bool close_in;
+     bool close_out;
+-    std::function<void()> function;
++    std::function<void(bool)> function;
+ };
+ 
+-void transfer(int in, int out, bool close_in, bool close_out, const std::function<void()> &function) {
++void transfer(int in, int out, bool close_in, bool close_out, const std::function<void(bool)> &function) {
+     char buf[8192];
+     int len;
++    bool output_failed = false;
+     while ((len = TEMP_FAILURE_RETRY(read(in, buf, 8192))) > 0) {
+         if (write_full(out, buf, len) == -1) {
+             //PLOGE("write");
++            output_failed = true;
+             break;
+         }
+     }
+@@ -72,7 +74,7 @@ void transfer(int in, int out, bool close_in, bool close_out, const std::functio
+ 
+     if (close_in) close(in);
+     if (close_out) close(out);
+-    if (function) function();
++    if (function) function(output_failed);
+ }
+ 
+ static void *transfer_thread(void *_data) {
+@@ -82,10 +84,17 @@ static void *transfer_thread(void *_data) {
+     return nullptr;
+ }
+ 
+-void transfer_async(int in, int out, const std::function<void()> &function, bool close_in, bool close_out) {
++void transfer_async(int in, int out, const std::function<void(bool)> &function, bool close_in, bool close_out) {
+     pthread_t pthread;
+     auto *data = new transfer_thread_data{in, out, close_in, close_out, function};
+-    pthread_create(&pthread, nullptr, transfer_thread, data);
++    if (pthread_create(&pthread, nullptr, transfer_thread, data) != 0) {
++        if (close_in) close(in);
++        if (close_out) close(out);
++        if (function) function(true);
++        delete data;
++        return;
++    }
++    pthread_detach(pthread);
+ }
+ 
+ int open_ptmx() {
+diff --git a/rish/src/main/cpp/pts.h b/rish/src/main/cpp/pts.h
+index e295f37..2fcae5c 100644
+--- a/rish/src/main/cpp/pts.h
++++ b/rish/src/main/cpp/pts.h
+@@ -12,7 +12,8 @@ int make_tty_raw(int fd, termios &old_termios);
+ 
+ int restore_fd(int fd, const termios &old_termios);
+ 
+-void transfer_async(int in, int out, const std::function<void()> &function = nullptr, bool close_in = true, bool close_out = true);
++// The completion callback receives true if forwarding to the output failed.
++void transfer_async(int in, int out, const std::function<void(bool)> &function = nullptr, bool close_in = true, bool close_out = true);
+ 
+ int open_ptmx();
+ 
+diff --git a/rish/src/main/cpp/rikka_rish_RishHost.cpp b/rish/src/main/cpp/rikka_rish_RishHost.cpp
+index e742fcc..c71f403 100644
+--- a/rish/src/main/cpp/rikka_rish_RishHost.cpp
++++ b/rish/src/main/cpp/rikka_rish_RishHost.cpp
+@@ -130,8 +130,10 @@ static jintArray RishHost_startHost(
+         releaseBytes(env, dirBlock, pdir);
+ 
+         auto called = std::make_shared<std::atomic_bool>(false);
+-        auto func = [pid, called]() {
+-            if (called->exchange(true)) {
++        auto func = [pid, called](bool output_failed) {
++            // EOF can mean that the command closed stdout while still writing
++            // stderr. Only a failed write indicates a disconnected client.
++            if (!output_failed || called->exchange(true)) {
+                 return;
+             }
+ 
+@@ -140,7 +142,8 @@ static jintArray RishHost_startHost(
+         };
+ 
+         if (in_tty) {
+-            transfer_async(stdin_read, ptmx/*, func*/);
++            // Input EOF must not close the master used by the output worker.
++            transfer_async(stdin_read, out_tty ? dup(ptmx) : ptmx);
+         } else {
+             transfer_async(stdin_read, stdin_pipe[1]/*, func*/);
+             close(stdin_pipe[0]);
+@@ -194,6 +197,21 @@ static jintArray RishHost_startHost(
+                 PLOGE("open %s", pts_slave);
+             }
+             LOGD("pts %d", pts);
++
++            if (in_tty && !out_tty) {
++                // Only input uses this PTY; nobody drains its echoed output.
++                // The local terminal already echoes input in this mode.
++                struct termios attributes{};
++                if (tcgetattr(pts, &attributes) == -1) {
++                    PLOGE("tcgetattr");
++                    exit(1);
++                }
++                attributes.c_lflag &= ~(ECHO | ECHONL);
++                if (tcsetattr(pts, TCSANOW, &attributes) == -1) {
++                    PLOGE("tcsetattr");
++                    exit(1);
++                }
++            }
+         } else {
+             LOGD("no need pts");
+         }
+@@ -203,7 +221,6 @@ static jintArray RishHost_startHost(
+             LOGD("pts -> in");
+         } else {
+             dup2(stdin_pipe[0], STDIN_FILENO);
+-            close(stdin_pipe[1]);
+             LOGD("pipe -> in");
+         }
+ 
+@@ -212,7 +229,6 @@ static jintArray RishHost_startHost(
+             LOGD("pts -> out");
+         } else {
+             dup2(stdout_pipe[1], STDOUT_FILENO);
+-            close(stdout_pipe[0]);
+             LOGD("pipe -> out");
+         }
+ 
+@@ -221,14 +237,20 @@ static jintArray RishHost_startHost(
+             LOGD("pts -> err");
+         } else {
+             dup2(stderr_pipe[1], STDERR_FILENO);
+-            close(stderr_pipe[0]);
+             LOGD("pipe -> err");
+         }
+ 
+         LOGD("istty stdin %d stdout %d stderr %d", isatty(STDIN_FILENO), isatty(STDOUT_FILENO), isatty(STDERR_FILENO));
+ 
+-        if (pts != -1) {
+-            close(pts);
++        // Keep only the child's standard descriptors. Inherited client pipe
++        // ends and duplicate slave descriptors would otherwise delay EOF.
++        const int inherited_fds[] = {
++                stdin_read, stdout_write, stderr_write,
++                stdin_pipe[0], stdin_pipe[1], stdout_pipe[0], stdout_pipe[1],
++                stderr_pipe[0], stderr_pipe[1], pts, ptmx,
++        };
++        for (int fd : inherited_fds) {
++            if (fd > STDERR_FILENO) close(fd);
+         }
+ 
+         if (envv) {
+diff --git a/rish/src/main/cpp/rikka_rish_RishTerminal.cpp b/rish/src/main/cpp/rikka_rish_RishTerminal.cpp
+index 217f907..9d24859 100644
+--- a/rish/src/main/cpp/rikka_rish_RishTerminal.cpp
++++ b/rish/src/main/cpp/rikka_rish_RishTerminal.cpp
+@@ -8,7 +8,9 @@
+ #include "logging.h"
+ #include "pts.h"
+ 
+-static pthread_mutex_t mutex, winch_mutex;
++static pthread_mutex_t output_mutex, winch_mutex;
++static pthread_cond_t output_cond;
++static int pending_output_transfers = 0;
+ static struct termios old_stdin{};
+ static int tty_in_raw = 0;
+ 
+@@ -30,6 +32,10 @@ static jbyte RishTerminal_prepare(JNIEnv *env, jclass clazz) {
+     if (isatty(STDOUT_FILENO)) atty |= ATTY_OUT;
+     if (isatty(STDERR_FILENO)) atty |= ATTY_ERR;
+ 
++    // A shared PTY can carry stderr only when stdout also uses it. Otherwise
++    // give stderr its own pipe, even when the local stderr is a terminal.
++    if (!(atty & ATTY_OUT)) atty &= ~ATTY_ERR;
++
+     LOGD("istty stdin %d stdout %d stderr %d", (atty & ATTY_IN) ? 1 : 0, (atty & ATTY_OUT) ? 1 : 0,
+          (atty & ATTY_ERR) ? 1 : 0);
+ 
+@@ -67,33 +73,33 @@ static jint RishTerminal_start(
+         }
+     }
+ 
+-    if (pthread_mutex_lock(&mutex) != 0) {
+-        PLOGE("pthread_mutex_lock");
+-    }
+-
+-    auto called = std::make_shared<std::atomic_bool>(false);
+-    auto func = [=]() {
+-        if (called->exchange(true)) {
+-            return;
+-        }
+-
+-        LOGI("remote exit");
+-
+-        if (tty_in_raw) {
+-            if (restore_fd(tty_fd, old_stdin) == 0) {
+-                tty_in_raw = 0;
++    // Count both streams before either worker can finish. TTY stderr is carried
++    // by the stdout/PTY stream and has no separate transfer worker.
++    pthread_mutex_lock(&output_mutex);
++    pending_output_transfers = err_tty ? 1 : 2;
++    pthread_mutex_unlock(&output_mutex);
++
++    auto func = [=](bool output_failed) {
++        pthread_mutex_lock(&output_mutex);
++        if (--pending_output_transfers == 0) {
++            LOGI("output transfers finished");
++
++            if (tty_in_raw) {
++                if (restore_fd(tty_fd, old_stdin) == 0) {
++                    tty_in_raw = 0;
++                }
+             }
+-        }
+ 
+-        if (pthread_mutex_unlock(&mutex) != 0) {
+-            PLOGE("pthread_mutex_unlock");
++            // Restore the terminal before allowing waitForProcessExit to return.
++            pthread_cond_broadcast(&output_cond);
+         }
++        pthread_mutex_unlock(&output_mutex);
+     };
+ 
+-    transfer_async(STDIN_FILENO, stdin_pipe/*, func*/);
++    transfer_async(STDIN_FILENO, stdin_pipe);
+     transfer_async(stdout_pipe, STDOUT_FILENO, func);
+     if (!err_tty) {
+-        transfer_async(stderr_pipe, STDERR_FILENO/*, func*/);
++        transfer_async(stderr_pipe, STDERR_FILENO, func);
+     }
+ 
+     auto sigwinch_handler = [](int sig) {
+@@ -116,17 +122,16 @@ static jlong RishTerminal_waitForWindowSizeChange(JNIEnv *env, jclass clazz, jin
+ }
+ 
+ static void RishTerminal_waitForProcessExit(JNIEnv *env, jclass clazz) {
+-    if (pthread_mutex_lock(&mutex) != 0) {
+-        PLOGE("pthread_mutex_lock");
+-    }
+-
+-    if (pthread_mutex_unlock(&mutex) != 0) {
+-        PLOGE("pthread_mutex_unlock");
++    pthread_mutex_lock(&output_mutex);
++    while (pending_output_transfers != 0) {
++        pthread_cond_wait(&output_cond, &output_mutex);
+     }
++    pthread_mutex_unlock(&output_mutex);
+ }
+ 
+ int rikka_rish_RishTerminal_registerNatives(JNIEnv *env) {
+-    pthread_mutex_init(&mutex, nullptr);
++    pthread_mutex_init(&output_mutex, nullptr);
++    pthread_cond_init(&output_cond, nullptr);
+     pthread_mutex_init(&winch_mutex, nullptr);
+ 
+     auto clazz = env->FindClass("rikka/rish/RishTerminal");
+diff --git a/rish/src/main/java/rikka/rish/RishHost.java b/rish/src/main/java/rikka/rish/RishHost.java
+index 4577a78..f0e4961 100644
+--- a/rish/src/main/java/rikka/rish/RishHost.java
++++ b/rish/src/main/java/rikka/rish/RishHost.java
+@@ -3,6 +3,8 @@ package rikka.rish;
+ import android.os.ParcelFileDescriptor;
+ import android.util.Log;
+ 
++import java.util.concurrent.CountDownLatch;
++
+ public class RishHost {
+ 
+     private static final String TAG = "RishHost";
+@@ -60,7 +62,8 @@ public class RishHost {
+     private final int stderr;
+     private int pid;
+     private int ptmx;
+-    private int exitCode = Integer.MAX_VALUE;
++    private int exitCode = -1;
++    private final CountDownLatch exited = new CountDownLatch(1);
+ 
+     public RishHost(
+             String[] args, String[] env, String dir,
+@@ -96,7 +99,13 @@ public class RishHost {
+         pid = result[0];
+         ptmx = result[1];
+ 
+-        new Thread(() -> exitCode = waitFor(pid)).start();
++        new Thread(() -> {
++            try {
++                exitCode = waitFor(pid);
++            } finally {
++                exited.countDown();
++            }
++        }).start();
+     }
+ 
+     public int getPid() {
+@@ -104,6 +113,12 @@ public class RishHost {
+     }
+ 
+     public int getExitCode() {
++        try {
++            exited.await();
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return -1;
++        }
+         return exitCode;
+     }
+ 
+diff --git a/rish/src/main/java/rikka/rish/RishTerminal.java b/rish/src/main/java/rikka/rish/RishTerminal.java
+index b8a601d..78643af 100644
+--- a/rish/src/main/java/rikka/rish/RishTerminal.java
++++ b/rish/src/main/java/rikka/rish/RishTerminal.java
+@@ -87,7 +87,7 @@ public class RishTerminal {
+     public void start() {
+         Log.d(TAG, "start");
+ 
+-        ttyFd = start(tty, getFd(stdin, 1), getFd(stdout, 0), getFd(stdout, 0));
++        ttyFd = start(tty, getFd(stdin, 1), getFd(stdout, 0), getFd(stderr, 0));
+ 
+         if (ttyFd != -1) {
+             new Thread(() -> {
+@@ -114,7 +114,7 @@ public class RishTerminal {
+         try {
+             data.writeInterfaceToken(RishConfig.getInterfaceToken());
+             data.writeLong(size);
+-            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_setWindowSize), data, null, 0);
++            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_setWindowSize), data, reply, 0);
+             reply.readException();
+         } finally {
+             data.recycle();
+@@ -130,7 +130,7 @@ public class RishTerminal {
+ 
+         try {
+             data.writeInterfaceToken(RishConfig.getInterfaceToken());
+-            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_getExitCode), data, null, 0);
++            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_getExitCode), data, reply, 0);
+             reply.readException();
+             return reply.readInt();
+         } finally {

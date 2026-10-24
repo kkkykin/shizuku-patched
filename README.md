@@ -7,7 +7,7 @@
 ## 补丁
 
 - [patches/main/0001-remove-entering-shell-message.patch](patches/main/0001-remove-entering-shell-message.patch)：删除主库的 `System.out.println("Entering shell...");`，避免 rish 的标准输出混入提示语。
-- [patches/api/pr534-with-stderr-drain.patch](patches/api/pr534-with-stderr-drain.patch)：原样保存提供的补丁，在 `api/` 子模块中修正 stderr 管道，并等待 stdout、stderr 都传输完毕后退出。
+- [patches/api/issue178-complete.patch](patches/api/issue178-complete.patch)：在 `api/` 子模块中修正 stderr 管道，等待 stdout、stderr 排空及子进程退出，并修复混合 TTY 重定向、EOF 处理和 Binder 回复。
 
 主库与 API 补丁分别在对应的 Git 仓库中应用。API 使用主库锁定的子模块提交；已应用的补丁会跳过，普通应用失败时尝试三方合并，冲突会中止构建。
 
