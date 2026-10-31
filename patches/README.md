@@ -1,13 +1,6 @@
 # 补丁目录
 
-`main/` 中的补丁相对于 Shizuku 主库根目录，`api/` 中的补丁相对于 API 子模块根目录。
+- `main/`：相对于 Shizuku 主库根目录。
+- `api/`：相对于主库锁定的 API 子模块根目录。
 
-- `main/0001-remove-entering-shell-message.patch`：只删除进入 shell 前写到 stdout 的提示。
-- `api/issue178-complete.patch`：修正 stderr 管道及混合 TTY 重定向，正确处理 EOF、等待输出排空及子进程退出，并修复 Binder 回复。
-
-当前验证基线：
-
-- Shizuku `master`：`15ade0e40042dc72f0e502d50b4cb16e3a19095e`。
-- 主库锁定的 API：`37ebcd3e45edf1d68975c70dd199350b434161f7`。
-
-补丁应用与重复应用检查在这些提交上验证；完整 Android 编译与 APK 运行验证由手动 Actions 构建及实机使用完成。
+各目录内按文件名排序，先应用 `*.patch`，再应用 `*.diff`。已应用的补丁跳过，应用失败时尝试三方合并，冲突则中止。
